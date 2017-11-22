@@ -89,7 +89,7 @@ def read(conf):
             _checkMonitor(monitor)
 
             if event == 0:
-                logger.info('poll loop')
+                logger.debug('poll loop')
                 continue
 
             while (True):
