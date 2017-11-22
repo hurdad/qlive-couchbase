@@ -17,8 +17,9 @@ logger = logging.getLogger(__name__)
 
 
 def _processMessage(msg, buckets):
-    # get message type and insert into couchbase bucket if configured
+    # get message type and insert into couchbase bucket as configured
     if msg['TYPE'] in buckets:
+        logger.debug(msg)
         buckets[msg['TYPE']].insert("{}".format(long(time.time() * 1000 * 1000)), msg['DATA'])
 
 
@@ -48,7 +49,7 @@ def _checkMonitor(monitor):
     try:
         event_monitor = monitor.recv(zmq.NOBLOCK)
     except zmq.Again:
-        # logging.debug( 'again' )
+        logging.debug('again')
         return
 
     (event_id, event_name, event_value) = _readSocketEvent(event_monitor)
