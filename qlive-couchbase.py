@@ -1,26 +1,26 @@
 #!/usr/bin/env python
 
-from couchbase.cluster import Cluster
-from couchbase.cluster import PasswordAuthenticator
-import time
-import struct
 import argparse
-
+import json
 import logging
-
-logging.basicConfig(level=logging.DEBUG)
+import struct
+import time
 
 # see https://github.com/zeromq/pyzmq/wiki/Building-and-Installing-PyZMQ
 # QuakeLive requires CZMQ 3.x APIs or newer (libzmq 4.x)
 import zmq
+from couchbase.cluster import Cluster
+from couchbase.cluster import PasswordAuthenticator
+from unidecode import unidecode
 
-HOST = 'tcp://127.0.0.1:27960'
-POLL_TIMEOUT = 1000
+logger = logging.getLogger(__name__)
+
 
 def _processMessage(msg, buckets):
-
+    # get message type and insert into couchbase bucket if configured
     if msg['TYPE'] in buckets:
         buckets[msg['TYPE']].insert("{}".format(long(time.time() * 1000 * 1000)), msg['DATA'])
+
 
 def _readSocketEvent(msg):
     # NOTE: little endian - hopefully that's not platform specific?
@@ -53,42 +53,42 @@ def _checkMonitor(monitor):
 
     (event_id, event_name, event_value) = _readSocketEvent(event_monitor)
     event_monitor_endpoint = monitor.recv(zmq.NOBLOCK)
-    logging.info('monitor: %s %d endpoint %s' % (event_name, event_value, event_monitor_endpoint))
+    logger.info('monitor: %s %d endpoint %s' % (event_name, event_value, event_monitor_endpoint))
 
 
-def verbose(args):
+def read(conf):
     try:
+        # connect to zmq stats socket
         context = zmq.Context()
         socket = context.socket(zmq.SUB)
         monitor = socket.get_monitor_socket(zmq.EVENT_ALL)
-        if (args.password is not None):
-            logging.info('setting password for access')
+        if conf['ql_server']['zmq_stats_password'] is not None:
             socket.plain_username = 'stats'
-            socket.plain_password = args.password
+            socket.plain_password = unidecode(conf['ql_server']['zmq_stats_password'])
             socket.zap_domain = 'stats'
-        socket.connect(args.host)
+        socket.connect(conf['ql_server']['zmq_stats_uri'])
         socket.setsockopt(zmq.SUBSCRIBE, '')
-        print('Connected SUB to %s' % args.host)
+        logging.info('Connecting zmq subscribe : %s' % conf['ql_server']['zmq_stats_uri'])
 
-        cluster = Cluster('couchbase://vm-couchbase.home.lan')
-        authenticator = PasswordAuthenticator('user', 'bubbles')
+        # connect to couchbase
+        cluster = Cluster(conf['couchbase_server']['uri'])
+        authenticator = PasswordAuthenticator(conf['couchbase_server']['username'],
+                                              conf['couchbase_server']['password'])
         cluster.authenticate(authenticator)
+        logging.info('Connecting couchbase : %s' % conf['couchbase_server']['uri'])
+
+        # connect to couchbase buckets
         buckets = {}
-        buckets['PLAYER_DEATH'] = cluster.open_bucket('qlive-player-death')
-        buckets['PLAYER_KILL'] = cluster.open_bucket('qlive-player-kill')
-        buckets['PLAYER_MEDAL'] = cluster.open_bucket('qlive-player-medal')
-        buckets['ROUND_OVER'] = cluster.open_bucket('qlive-round-over')
-        buckets['PLAYER_STATS'] = cluster.open_bucket('qlive-player-stats')
-        buckets['MATCH_REPORT'] = cluster.open_bucket('qlive-match-report')
+        for x in conf['couchbase_server']['buckets']:
+            buckets[x['ql_msg_type']] = cluster.open_bucket(x['bucket_name'])
 
-
-        while (True):
-            event = socket.poll(POLL_TIMEOUT)
+        while True:
+            event = socket.poll(long(conf['ql_server']['zmq_socket_timeout']))
             # check if there are any events to report on the socket
             _checkMonitor(monitor)
 
-            if (event == 0):
-                # logging.info( 'poll loop' )
+            if event == 0:
+                logger.info('poll loop')
                 continue
 
             while (True):
@@ -97,22 +97,38 @@ def verbose(args):
                 except zmq.error.Again:
                     break
                 except Exception, e:
-                    logging.info(e)
+                    logger.error(e)
                     break
                 else:
                     _processMessage(msg, buckets)
 
     except Exception, e:
-        logging.info(e)
+        logger.error(e)
     finally:
-        raw_input('Press Enter to continue...')
+        logger.info("Exiting..")
 
 
-if (__name__ == '__main__'):
-    logging.info('zmq python bindings %s, libzmq version %s' % (repr(zmq.__version__), zmq.zmq_version()))
-    parser = argparse.ArgumentParser(description='Verbose QuakeLive server statistics')
-    parser.add_argument('--host', default=HOST, help='ZMQ URI to connect to. Defaults to %s' % HOST)
-    parser.add_argument('--password', required=False)
+if __name__ == '__main__':
+
+    # parse arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-d', "--debug", action="store_true", help="Enable Debugging")
+    parser.add_argument('-c', '--conf', required=True, help="JSON Config File")
     args = parser.parse_args()
-    # logging.debug( repr( args ) )
-    verbose(args)
+
+    # configure logging
+    logging.basicConfig(format="%(asctime)s [%(name)s:%(lineno)d][%(levelname)s] %(message)s", level=logging.INFO)
+
+    # enable debugging
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
+
+    # open config and parse
+    with open(args.conf) as data_file:
+        conf = json.load(data_file)
+
+    # log configuration
+    logger.info('zmq python bindings %s, libzmq version %s' % (repr(zmq.__version__), zmq.zmq_version()))
+
+    # run
+    read(conf)
